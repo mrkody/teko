@@ -1,14 +1,7 @@
 <?php
 
-namespace Mrkody\Payanyway\Exception;
+namespace Mrkody\Teko\Exception;
 
-/**
- * Class PaymentException
- *
- * @author JhaoDa <jhaoda@gmail.com>
- *
- * @package Idma\Robokassa\Exception
- */
 class PaymentException extends \Exception {
     public function __construct($message = '', $code = 0, \Exception $previous = null) {
         $message = $message ? $message : 'Unknown payment exception.';

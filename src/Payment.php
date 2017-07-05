@@ -1,290 +1,386 @@
 <?php
 
-namespace Mrkody\Payanyway;
+namespace Mrkody\Teko;
 
-use Idma\Robokassa\Exception\InvalidSumException;
-use Idma\Robokassa\Exception\InvalidParamException;
-use Idma\Robokassa\Exception\InvalidInvoiceIdException;
-use Idma\Robokassa\Exception\EmptyDescriptionException;
+use Mrkody\Teko\Exception\InvalidOrderException;
+use Mrkody\Teko\Exception\InvalidSignatureException;
 
 use Illuminate\Support\Facades\Log;
-
 
 /**
  * Class Payment
  *
  * @author mrkody kody1994@mail.ru
  *
- * @package Mrkody\Payanyway
+ * @package Mrkody\Teko
  */
-class Payment {
-    private $baseUrl      = 'https://www.moneta.ru/assistant.htm';
-    private $isTestMode   = false;
-    private $valid        = false;
-    private $data;
-    private $customParams = [];
-    private $submit_button_class;
-    private $submit_button_name;
 
-    private $mnt_id;
-    private $mnt_currency_code;
-    private $moneta_locale;
-    private $paymentPassword;
+class Payment {
+    private $baseUrl = 'http://pg.teko.io:3005/init_session';
+    private $valid   = false;
+    private $client;
+    private $payment;
+    private $order;
+    private $account;
+    private $data;
+
+    private $redirectURL;
+    private $product;
+    private $locale;
+    private $currency; // "ISO"
+    private $theme; // "light", "dark"
+    private $url;
+    private $icon;
+    private $retry; // undefined, "url", "widget-close"
+    private $secret;
+
     private $signature;
 
-    private $mnt_user;
-    private $paymentSystem_unitId;
-    private $mnt_corraccount;
+    private $tx;
 
     public function __construct(
-        $mnt_id, 
-        $mnt_currency_code, 
-        $moneta_locale, 
-        $paymentPassword, 
-        $testMode = false, 
-        $submit_button_class = '', 
-        $submit_button_name = 'Pay'
+        $base_url,
+        $client_id, 
+        $client_showcase,
+        $currency, 
+        $secret, 
+        $locale = 'ru',
+        $theme = 'light'
     ) {
-        $this->mnt_id              = $mnt_id;
-        $this->mnt_currency_code   = $mnt_currency_code;
-        $this->moneta_locale       = $moneta_locale;
-        $this->isTestMode          = $testMode;
-        $this->paymentPassword     = $paymentPassword;
-        $this->submit_button_class = $submit_button_class;
-        $this->submit_button_name  = $submit_button_name;
+        $this->baseUrl    = $base_url;
+        $this->currency   = $currency;
+        $this->secret     = $secret;
+        $this->locale     = $locale;
+        $this->theme      = $theme;
 
-        /*if($this->isTestMode)
+        $this->createClient($client_id, $client_showcase);
+    }
+
+    private function createClient($id, $showcase)
+    {
+        $this->client = [
+            'id' => $id,
+            'showcase' => $showcase,
+        ];
+    }
+
+    public function setProduct($value)
+    {
+        $this->product = $value;
+    } 
+
+    public function setAccount($id, $extra = [])
+    {
+        $this->account = [
+            'id' => $id,
+        ];
+        if(count($extra)) $this->account['extra'] = $extra;
+    }
+
+    public function setRedirectURL($value)
+    {
+        $this->redirectURL = $value;
+    }
+
+    public function setUrl($value)
+    {
+        $this->url = $value;
+    }
+
+    public function setIcon($value)
+    {
+        $this->icon = $value;
+    }
+
+    public function setRetry($value)
+    {
+        $this->retry = $value;
+    }
+
+    public function setOrder($cls, $data = [], $extra = [])
+    {
+        if($cls == 'item_list')
         {
-            $this->baseUrl = 'https://demo.moneta.ru/assistant.htm';
-        }*/
-        $this->data['MNT_COMMAND'] = false;
-        $this->data['MNT_ID'] = $this->mnt_id;
-        $this->data['MNT_TRANSACTION_ID'] = false;
-        $this->data['MNT_OPERATION_ID'] = false;
-        $this->data['MNT_AMOUNT'] = false;
-        $this->data['MNT_CURRENCY_CODE'] = $this->mnt_currency_code;
-        $this->data['MNT_SUBSCRIBER_ID'] = '';
-        $this->data['MNT_TEST_MODE'] = (int)$this->isTestMode;
+            $this->order = [
+                'cls' => $cls,
+                $cls => $data, // [[id, name, count],...]
+            ];
+        } elseif ($cls == 'transaction') {
+            $this->order = [
+                'cls' => $cls,
+                $cls => $data, // [id, start_t]
+            ];
+        } else {
+            throw new InvalidOrderException();
+        }
+        if(count($extra)) $this->order['extra'] = $extra;
+    }
+
+    public function setPayment($amount)
+    {
+        $this->payment = [
+            'amount' => (int)ceil($amount),
+            'currency' => $this->currency,
+            'exponent' => 2,
+        ];
     }
 
     public function getPaymentForm()
     {
-        if (empty($this->customParams['MNT_DESCRIPTION'])) {
-            throw new EmptyDescriptionException();
+        if (empty($this->baseUrl)) {
+            throw new \Exception();
         }
 
-        if ($this->data['MNT_TRANSACTION_ID'] <= 0) {
-            throw new InvalidInvoiceIdException();
+        if (empty($this->redirectURL)) {
+            throw new \Exception();
         }
 
-        $this->data['MNT_SIGNATURE'] = $this->makeSignature($this->data);
+        if (empty($this->account)) {
+            throw new \Exception();
+        }
 
-        //$this->data['MNT_SUBSCRIBER_ID'] = 7;
+        if (empty($this->payment)) {
+            throw new \Exception();
+        }
 
-        if(!$this->isTestMode)
+        if (empty($this->client)) {
+            throw new \Exception();
+        }
+
+        if (empty($this->order)) {
+            throw new \Exception();
+        }
+
+        $data = [
+            'dst' => $this->account, 
+            'initiator' => $this->client,
+            'locale' => $this->locale, 
+            'order' => $this->order, 
+            'payment' => $this->payment, 
+            'product' => $this->product, 
+            'redirect_url' => $this->redirectURL, 
+        ];
+
+        if(isset($this->icon))
         {
-            unset($this->data['MNT_TEST_MODE']);
+            $data['icon'] = $this->icon;
+        }
+        if(isset($this->url))
+        {
+            $data['url'] = $this->url;
+        }
+        if(isset($this->retry))
+        {
+            $data['retry'] = $this->retry;
         }
 
-        $string = "<form action='{$this->baseUrl}' method='post' style='display:inline-block;'>";
-        foreach(array_merge($this->data, $this->customParams) as $name => $item)
-        {
-            if($item !== false)
-            {
-                $string .= "<input type='hidden' name='$name' value='$item'>";
-            }
-        }
-        $string .= "<input type='hidden' name='moneta.locale' value='$this->moneta_locale'>";
-        $string .= "<input type='submit' class='{$this->submit_button_class}' value='{$this->submit_button_name}'></form>";
+       /* $data = [
+            'order' => ['cls' => 'transaction', 'transaction' => ['id' => '77964', 'start_t' => 1496834313]], 
+            'payment' => ['amount' => 100, 'currency' => 840, 'exponent' => 2], 
+            'redirect_url' => 'google.com', 
+            'inner_cur_amount' => '',
+            'inner_cur_name' => '',
+            'comment' => '',
+        ];*/
+
+        $this->signature = $this->makeSignature($data);
+
+        $data['theme'] = $this->theme;
+
+        $string = "<iframe with='100%' height='100%' src=" . $this->makeURL($data) . " onload='resizeIframe(this)'></iframe>";
 
         return $string;
     }
 
-    public function validateResult($data)
+    private function makeURL(&$data)
     {
-        return $this->validate($data);
-    }
-
-    public function validateCheck($data)
-    {
-        $this->data['MNT_COMMAND'] = 'CHECK';
-
-        return $this->validate($data);
-    }
-
-    public function checkResponseAmount()
-    {
-        return $this->checkResponse(100);
-    }
-
-    public function checkResponseSuccess()
-    {
-        return $this->checkResponse(402);
-    }
-
-    public function checkResponseFail()
-    {
-        return $this->checkResponse(302);
-    }
-
-    public function checkResponseDecline()
-    {
-        return $this->checkResponse(500);
-    }
-
-    private function checkResponse($result_code)
-    {
-        $xml = new \SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><MNT_RESPONSE/>');
-
-        $response_array['MNT_RESULT_CODE'] = $result_code;
-        $response_array['MNT_ID'] = $this->data['MNT_ID'];
-        if(isset($this->data['MNT_TRANSACTION_ID']))
+        if(empty($this->signature))
         {
-            $response_array['MNT_TRANSACTION_ID'] = $this->data['MNT_TRANSACTION_ID'];
-        }
-        $signature = $this->makeSignature($response_array);
-
-        if(isset($this->data['MNT_AMOUNT']))
-        {
-            $response_array['MNT_AMOUNT'] = $this->data['MNT_AMOUNT'];
-        }
-        $response_array['MNT_SIGNATURE'] = $signature;
-
-        array_to_xml($response_array, $xml);
-
-        return $xml->asXML();
-    }
-
-    public function validateSuccess($data)
-    {
-        return $this->data['MNT_TRANSACTION_ID'] = $data['MNT_TRANSACTION_ID'];
-    }
-
-    private function validate($data)
-    {
-        if(isset($this->data['MNT_TRANSACTION_ID']))
-        {
-            $this->data['MNT_TRANSACTION_ID'] = $data['MNT_TRANSACTION_ID'];
-        }
-        if(isset($data['MNT_OPERATION_ID']))
-        {
-            $this->data['MNT_OPERATION_ID'] = $data['MNT_OPERATION_ID'];
-        }
-        if(isset($data['MNT_AMOUNT']))
-        {
-            $this->data['MNT_AMOUNT'] = $data['MNT_AMOUNT'];
-        }
-        $this->data['MNT_SUBSCRIBER_ID'] = (!empty($data['MNT_SUBSCRIBER_ID']))?$data['MNT_SUBSCRIBER_ID']:'';
-       
-        if(isset($data['MNT_USER']))
-        {
-            $this->mnt_user = $data['MNT_USER'];
-        }
-        if(isset($data['paymentSystem_unitId']))
-        {
-            $this->paymentSystem_unitId = $data['paymentSystem_unitId'];
-        }
-        if(isset($data['MNT_CORRACCOUNT']))
-        {
-            $this->mnt_corraccount = $data['MNT_CORRACCOUNT'];
+            throw new \Exception();
         }
 
-        $this->signature = $data['MNT_SIGNATURE'];
-        
-        Log::info(print_r($this->data, true));
+        $data['signature'] = $this->signature;
 
-        $signature = $this->makeSignature($this->data);
-        $this->valid = ($signature === strtolower($this->signature));
+        $string = '';
+        foreach($data as $key => $value)
+        {
+            if(is_array($value))
+            {
+                $string .= urlencode($key) . '=' . str_replace('"', '%22', json_encode($value, JSON_HEX_QUOT)); 
+            } elseif($key == 'signature') {
+                $string .= urlencode($key) . '=' . $value;
+            } else {
+                $string .= urlencode($key) . '=' . urlencode($value);
+            }
+            $string .= '&';
+        }
 
-        return $this->valid;
+        return $this->baseUrl . '?' . rtrim($string, '&');
     }
 
-    public function isValid()
+    private function setTx($id, $start_t)
     {
-        return $this->valid;
+        $this->tx = [
+            'id' => $id,
+            'start_t' => $start_t,
+        ];
+    }
+
+    public function validate($data, $signature, $post_body)
+    {
+        if(!empty($signature))
+        {
+            $this->signature = $signature;
+            $signature = $this->makeHash($post_body);
+
+            if($this->valid = ($signature === $this->signature))
+            {
+                if(isset($data['product']))
+                {
+                    $this->setProduct($data['product']);
+                }
+                if(isset($data['payment']))
+                {
+                    $this->setPayment($data['payment']['amount']);
+                }
+                if(isset($data['order']))
+                {
+                    $this->setOrder($data['order']['cls'], $data['order'][$data['order']['cls']]);
+                }
+                if(isset($data['order']))
+                {
+                    $this->setOrder($data['order']['cls'], $data['order'][$data['order']['cls']]);
+                }
+                if(isset($data['tx']))
+                {
+                    $this->setTx($data['tx']['id'], $data['tx']['start_t']);
+                }
+            }
+
+            return $this->valid;
+        }
+        throw new InvalidSignatureException();
     }
 
     public function getSuccessAnswer() {
-        return 'SUCCESS';
+        if(isset($this->tx))
+        {
+            $res = [
+                'success' => true,
+                'result' => [
+                    'tx' => $this->tx,
+                ],
+            ];
+            Log::info(json_encode($res));
+            return response()->json($res);
+        }
+        return $this->getFailAnswer();
+    }
+
+    public function getFailAnswer() {
+        $res = [
+            'success' => false,
+            'result' => [
+                'code' => 302,
+                'description' => 'Incorrect request.',
+            ],
+        ];
+        Log::info(json_encode($res));
+        return response()->json($res);
     }
 
     public function getTransactionId()
     {
-        return $this->data['MNT_TRANSACTION_ID'];
-    }
-
-    public function setTransactionId($id)
-    {
-        $this->data['MNT_TRANSACTION_ID'] = (int) $id;
-
-        return $this;
-    }
-
-    public function getSum()
-    {
-        return $this->data['MNT_AMOUNT'];
-    }
-
-    public function setSum($summ)
-    {
-        $summ = number_format($summ, 2, '.', '');
-
-        if ($summ > 0) {
-            $this->data['MNT_AMOUNT'] = $summ;
-
-            return $this;
-        } else {
-            throw new InvalidSumException();
-        }
-    }
-
-    /**
-     * @return string
-     */
-    public function getDescription()
-    {
-        return $this->customParams['MNT_DESCRIPTION'];
-    }
-
-    public function setDescription($description)
-    {
-        $this->customParams['MNT_DESCRIPTION'] = (string) $description;
-
-        return $this;
-    }
-
-    public function getSubscriberId()
-    {
-        return $this->data['MNT_SUBSCRIBER_ID'];
-    }
-
-    public function setSubscriberId($id)
-    {
-        $this->data['MNT_SUBSCRIBER_ID'] = (int) $id;
-
-        return $this;
-    }
-
-    public function getPaymentSystem()
-    {
-        return $this->paymentSystem_unitId;
-    }
-
-    private function makeSignature(&$data)
-    {
-        $signature = '';
-        foreach($data as $item)
+        if(isset($this->order))
         {
-            if($item !== false)
+            if(isset($this->order['transaction']))
             {
-                $signature .= $item;
+                return $this->order['transaction']['id'];
             }
         }
-        $signature .= $this->paymentPassword;
-
-        Log::info($signature);
-
-        return md5($signature);
+        return false;
     }
-    
+
+    public function getAmount()
+    {
+        return $this->payment['amount'];
+    }
+
+    public function getAccountId()
+    {
+        if(isset($this->account['id']))
+        {
+            return $this->account['id'];
+        }
+        return false;
+    }
+
+    private function makeSignature(array &$data)
+    {
+        $string = $this->_toByteValueOrderedQueryString($data);
+
+        $signature = $this->makeHash($string);
+      
+        return $signature;
+    }
+
+    private function makeHash($string)
+    {
+        $hash = base64_encode(hash_hmac('sha1', $string, $this->secret, true));
+
+        Log::info([$hash, $string]);
+
+        return $hash;
+    }
+
+    private function _toByteValueOrderedQueryString(array &$data)
+    {
+        $this->ksortRecursive($data);
+
+        $string = '';
+        foreach($data as $key => $value)
+        {
+            if(!empty($value) || true)
+            {
+                if(
+                    !in_array(
+                        $key, 
+                        [
+                            'initiator', 
+                            'dst', 
+                            'payment', 
+                            'order', 
+                            'product', 
+                            'redirect_url', 
+                            'locale',
+                            'comment',
+                            'inner_cur_amount',
+                            'inner_cur_name',
+                        ]
+                    )
+                ) {
+                    continue;
+                }
+                if(is_array($value))
+                {
+                    $string .= $key . '|' . json_encode($value);
+                } else {
+                    $string .= $key . '|' . $value;
+                }
+                $string .= '|';
+            }
+        }
+
+        return rtrim($string, '|');
+    }
+
+    private function ksortRecursive(&$array, $sort_flags = SORT_REGULAR) {
+        if (!is_array($array)) return false;
+        ksort($array, $sort_flags);
+        foreach ($array as &$arr) {
+            $this->ksortRecursive($arr, $sort_flags);
+        }
+        return true;
+    }
+
 }
